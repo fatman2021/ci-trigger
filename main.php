@@ -177,7 +177,7 @@ class RestartAllBuilds extends Command
             throw new InvalidArgumentException("--github-token required.");
         }
 
-        $includeRegex = "/" . preg_quote($input->getOption('include'), $delimiter = "/") . "/";
+        $includeRegex = "/" . $input->getOption('include') . "/";
         $dryRun = $input->getOption('dry-run');
 
         $travis = new TravisService($githubToken, $dryRun);
