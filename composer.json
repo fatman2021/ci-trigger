@@ -1,0 +1,14 @@
+{
+    "name": "piwik/ci-trigger",
+    "description": "Trigger all travis-ci builds for one or more user accounts.",
+    "require": {
+        "guzzle/guzzle": "~3.9",
+        "symfony/console": "~2.6"
+    },
+    "authors": [
+        {
+            "name": "Piwik",
+            "email": "hello@piwik.org"
+        }
+    ]
+}
