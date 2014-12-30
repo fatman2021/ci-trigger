@@ -13,6 +13,20 @@ use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 use Guzzle\Http\Client;
 
+class GuzzleClientFactory
+{
+    static $clientOverride = null;
+
+    public static function make()
+    {
+        if (empty(self::$clientOverride)) {
+            return new Client();
+        } else {
+            return self::$clientOverride;
+        }
+    }
+}
+
 class TravisClient
 {
     const PRO_ENDPOINT = "https://api.travis-ci.com";
@@ -22,21 +36,24 @@ class TravisClient
     private $proAccessToken;
     private $normalAccessToken;
 
-    public function __construct($githubToken)
+    public function __construct()
     {
-        $this->guzzleClient = new Client();
-
-        $this->normalAccessToken = $this->authenticate($githubToken, $isPro = false);
-        $this->proAccessToken = $this->authenticate($githubToken, $isPro = true);
+        $this->guzzleClient = GuzzleClientFactory::make();
     }
 
-    private function authenticate($githubToken, $isPro)
+    public function authenticate($githubToken, $isPro)
     {
         $response = $this->post("/auth/github", $isPro, array('github_token' => $githubToken));
         if (empty($response['access_token'])) {
             throw new \Exception("Authenticating against " . $this->getEndpoint($isPro) . " returned response w/o access_token: " . json_encode($response));
         }
-        return $response['access_token'];
+
+        $accessToken = $response['access_token'];
+        if ($isPro) {
+            $this->proAccessToken = $accessToken;
+        } else {
+            $this->normalAccessToken = $accessToken;
+        }
     }
 
     private function getEndpoint($isPro)
@@ -90,27 +107,49 @@ class TravisService
 {
     private $client;
     private $isDryRun;
+    private $githubUser;
+    private $skipPro;
+    private $skipOrg;
 
-    public function __construct($githubToken, $isDryRun)
+    public function __construct($githubToken, $githubUser, $isDryRun, $skipPro = false, $skipOrg = false)
     {
-        $this->client = new TravisClient($githubToken);
+        $this->client = new TravisClient();
+        $this->githubUser = $githubUser;
         $this->isDryRun = $isDryRun;
+        $this->skipPro = $skipPro;
+        $this->skipOrg = $skipOrg;
+
+        if (!$this->skipOrg) {
+            $this->client->authenticate($githubToken, $isPro = false);
+        }
+
+        if (!$this->skipPro) {
+            $this->client->authenticate($githubToken, $isPro = true);
+        }
     }
 
     public function getAllRepos()
     {
-        $proRepos = $this->client->get("/repos/?member=piwik-pro-travis-automation", $isPro = true);
-        $nonProRepos = $this->client->get("/repos/?member=piwik-pro-travis-automation", $isPro = false);
+        $apiPath = "/repos/?member=" . $this->githubUser;
 
         $result = array();
-        foreach (@$proRepos['repos'] as $repo) {
-            $repo['isPro'] = true;
-            $result[] = $repo;
+
+        if (!$this->skipPro) {
+            $proRepos = $this->client->get($apiPath, $isPro = true);
+            foreach (@$proRepos['repos'] as $repo) {
+                $repo['isPro'] = true;
+                $result[] = $repo;
+            }
         }
-        foreach (@$nonProRepos['repos'] as $repo) {
-            $repo['isPro'] = false;
-            $result[] = $repo;
+
+        if (!$this->skipOrg) {
+            $nonProRepos = $this->client->get($apiPath, $isPro = false);
+            foreach (@$nonProRepos['repos'] as $repo) {
+                $repo['isPro'] = false;
+                $result[] = $repo;
+            }
         }
+
         return $result;
     }
 
@@ -165,9 +204,12 @@ class RestartAllBuilds extends Command
     {
         $this->setName(self::NAME);
         $this->setDescription("Restart the newest build of all repos a github user has access to in travis-ci.com and travis-ci.org.");
-        $this->addOption('github-token', null, InputOption::VALUE_REQUIRED, "Github user token to use.");
+        $this->addOption('github-token', null, InputOption::VALUE_REQUIRED, "(required) Github user token to use.");
+        $this->addOption('github-user', null, InputOption::VALUE_REQUIRED, "(required) The github username to use when filtering repos to rebuild.");
         $this->addOption('include', null, InputOption::VALUE_REQUIRED, "Regex used with repo slugs to determine which repos to restart builds for, eg, '/plugin-'");
         $this->addOption('dry-run', null, InputOption::VALUE_NONE, "If supplied, builds will not be actually restarted. Used for testing.");
+        $this->addOption('skip-pro', null, InputOption::VALUE_NONE, "If supplied, Travis PRO builds will be skipped. Use this option if you do not have a travis pro account.");
+        $this->addOption('skip-org', null, InputOption::VALUE_NONE, "If supplied, non-PRO Travis builds will be skipped. Use this option if your user does not exist on travis.");
     }
 
     protected function execute(InputInterface $input, OutputInterface $output)
@@ -177,10 +219,25 @@ class RestartAllBuilds extends Command
             throw new InvalidArgumentException("--github-token required.");
         }
 
+        $githubUser = $input->getOption('github-user');
+        if (empty($githubUser)) {
+            throw new \InvalidArgumentException("The --github-user option required (in order to filter results from travis-ci.org API.");
+        }
+
         $includeRegex = "/" . $input->getOption('include') . "/";
         $dryRun = $input->getOption('dry-run');
 
-        $travis = new TravisService($githubToken, $dryRun);
+        $skipPro = $input->getOption('skip-pro');
+        if ($skipPro) {
+            $output->writeln("<comment>NOTE:</comment> Skipping Travis PRO repos (if any).");
+        }
+
+        $skipOrg = $input->getOption('skip-org');
+        if ($skipOrg) {
+            $output->writeln("<comment>NOTE:</comment> Skipping travis-ci.org repos (if any).");
+        }
+
+        $travis = new TravisService($githubToken, $githubUser, $dryRun, $skipPro, $skipOrg);
         $allRepos = $travis->getAllRepos();
 
         foreach ($allRepos as $repoInfo) {
